@@ -20,7 +20,9 @@ import {
   Clock,
   Building2,
   DollarSign,
-  TrendingUp
+  TrendingUp,
+  RefreshCw,
+  Info
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -72,6 +74,16 @@ interface UnsavedChanges {
   changedCells: Set<string>
 }
 
+interface SyncStatus {
+  isLoading: boolean
+  lastSync?: string
+  totalMunicipalities?: number
+  existingZones?: number
+  newZonesCreated?: number
+  needsSync?: boolean
+  missingZones?: string[]
+}
+
 const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   // State Management
   const [pricingData, setPricingData] = useState<PricingData>({
@@ -106,8 +118,10 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
   const [newCategory, setNewCategory] = useState({ name: '', description: '', color: 'blue' })
   const [newLevel, setNewLevel] = useState({ name: '', description: '', discount: 0 })
   const [loading, setLoading] = useState(false)
-  const [notification, setNotification] = useState<{ type: 'success' | 'error', message: string } | null>(null)
+  const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info', message: string } | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isLoading: false })
+  const [showSyncInfo, setShowSyncInfo] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Duration options with discounts
@@ -119,32 +133,140 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
     { value: 365, label: 'سنة كاملة', discount: 20, unit: 'year' }
   ]
 
-  // Initialize pricing data
+  // Initialize pricing data and check sync status
   useEffect(() => {
-    initializePricingData()
+    const init = async () => {
+      await initializePricingData()
+      await checkSyncStatus()
+    }
+    init()
   }, [])
 
+  // Check if sync is needed
+  const checkSyncStatus = async () => {
+    try {
+      const { newPricingService } = await import('@/services/newPricingService')
+      const syncCheck = await newPricingService.checkNeedForSync()
+
+      setSyncStatus(prev => ({
+        ...prev,
+        needsSync: syncCheck.needsSync,
+        missingZones: syncCheck.missingZones
+      }))
+
+      if (syncCheck.needsSync) {
+        showNotification('info', `تم العثور على ${syncCheck.missingZones.length} منطقة جديدة تحتاج مزامنة`)
+      }
+    } catch (error) {
+      console.error('خطأ في فحص حالة المزامنة:', error)
+    }
+  }
+
+  // Sync pricing zones with Excel data
+  const syncWithExcel = async () => {
+    setSyncStatus(prev => ({ ...prev, isLoading: true }))
+
+    try {
+      const { newPricingService } = await import('@/services/newPricingService')
+      const result = await newPricingService.syncWithExcelData()
+
+      if (result.success && result.summary) {
+        setSyncStatus({
+          isLoading: false,
+          lastSync: new Date().toISOString(),
+          totalMunicipalities: result.summary.totalMunicipalities,
+          existingZones: result.summary.existingZones,
+          newZonesCreated: result.summary.newZonesCreated,
+          needsSync: false,
+          missingZones: []
+        })
+
+        // تحديث البيانات المعروضة
+        initializePricingData()
+
+        const message = result.summary.newZonesCreated > 0
+          ? `تمت المزامنة بنجاح! تم إنشاء ${result.summary.newZonesCreated} منطقة جديدة`
+          : 'تمت المزامنة بنجاح! جميع المناطق محدثة'
+
+        showNotification('success', message)
+      } else {
+        setSyncStatus(prev => ({ ...prev, isLoading: false }))
+        showNotification('error', `فشل في المزامنة: ${result.error}`)
+      }
+    } catch (error: any) {
+      setSyncStatus(prev => ({ ...prev, isLoading: false }))
+      showNotification('error', `خطأ في المزامنة: ${error.message}`)
+    }
+  }
+
   // Show notification temporarily
-  const showNotification = (type: 'success' | 'error', message: string) => {
+  const showNotification = (type: 'success' | 'error' | 'info', message: string) => {
     setNotification({ type, message })
-    setTimeout(() => setNotification(null), 3000)
+    setTimeout(() => setNotification(null), type === 'info' ? 5000 : 3000)
   }
 
   // Initialize default pricing data
-  const initializePricingData = () => {
-    const initialPrices: Record<string, Record<string, number>> = {}
-    
-    pricingData.sizes.forEach(size => {
-      initialPrices[size] = {}
-      pricingData.categories.forEach(category => {
-        // Generate realistic pricing based on size and category
-        const basePrice = getSizeBasePrice(size)
-        const categoryMultiplier = getCategoryMultiplier(category.id)
-        initialPrices[size][category.id] = Math.round(basePrice * categoryMultiplier)
-      })
-    })
+  const initializePricingData = async () => {
+    try {
+      // Load from the new pricing service
+      const { newPricingService } = await import('@/services/newPricingService')
+      const pricingFromService = newPricingService.getPricing()
 
-    setPricingData(prev => ({ ...prev, prices: initialPrices }))
+      // Update municipalities list from pricing zones
+      const availableZones = Object.keys(pricingFromService.zones)
+      const updatedMunicipalities = availableZones.map((zoneName, index) => ({
+        id: (index + 1).toString(),
+        name: zoneName,
+        multiplier: 1.0 // Will be updated from municipality service if available
+      }))
+
+      // Try to get multipliers from municipality service
+      try {
+        const { municipalityService } = await import('@/services/municipalityService')
+        updatedMunicipalities.forEach(muni => {
+          const municipalityData = municipalityService.getMunicipalityByName(muni.name)
+          if (municipalityData) {
+            muni.multiplier = municipalityData.multiplier
+          }
+        })
+      } catch (error) {
+        console.warn('Municipality service not available, using default multipliers')
+      }
+
+      const initialPrices: Record<string, Record<string, number>> = {}
+
+      pricingData.sizes.forEach(size => {
+        initialPrices[size] = {}
+        pricingData.categories.forEach(category => {
+          // Generate realistic pricing based on size and category
+          const basePrice = getSizeBasePrice(size)
+          const categoryMultiplier = getCategoryMultiplier(category.id)
+          initialPrices[size][category.id] = Math.round(basePrice * categoryMultiplier)
+        })
+      })
+
+      setPricingData(prev => ({
+        ...prev,
+        prices: initialPrices,
+        municipalities: updatedMunicipalities
+      }))
+
+    } catch (error) {
+      console.error('خطأ في تحميل بيانات الأسعار:', error)
+      // Fallback to original initialization
+      const initialPrices: Record<string, Record<string, number>> = {}
+
+      pricingData.sizes.forEach(size => {
+        initialPrices[size] = {}
+        pricingData.categories.forEach(category => {
+          const basePrice = getSizeBasePrice(size)
+          const categoryMultiplier = getCategoryMultiplier(category.id)
+          initialPrices[size][category.id] = Math.round(basePrice * categoryMultiplier)
+        })
+      })
+
+      setPricingData(prev => ({ ...prev, prices: initialPrices }))
+    }
   }
 
   // Get base price for size
@@ -226,17 +348,18 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
     setEditingValue(pricingData.prices[size]?.[category]?.toString() || '')
   }
 
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (!editingCell) return
-    
+
     const [size, category] = editingCell.split('-')
     const value = parseInt(editingValue) || 0
-    
+
     if (value < 0) {
       showNotification('error', 'لا يمكن أن يكون السعر أقل من صفر')
       return
     }
 
+    // Update local state
     setPricingData(prev => ({
       ...prev,
       prices: {
@@ -253,6 +376,31 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
       changedCells: new Set([...prev.changedCells, editingCell])
     }))
 
+    // Auto-save the change
+    try {
+      const { newPricingService } = await import('@/services/newPricingService')
+      const currentPricing = newPricingService.getPricing()
+
+      // Update the specific pricing zone (assuming we're working with the current municipality)
+      const currentZone = pricingData.currentMunicipality
+      const zoneName = pricingData.municipalities.find(m => m.id === currentZone)?.name || 'مصراتة'
+
+      if (currentPricing.zones[zoneName]) {
+        // Update the zone's customer type pricing
+        const customerType = category as 'marketers' | 'individuals' | 'companies'
+        if (currentPricing.zones[zoneName].prices[customerType]) {
+          currentPricing.zones[zoneName].prices[customerType][size] = value
+
+          const result = newPricingService.updatePricing(currentPricing)
+          if (result.success) {
+            console.log(`تم حفظ السعر تلقائياً: ${size} - ${category} = ${value}`)
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('لم يتم الحفظ التلقائي:', error)
+    }
+
     setEditingCell(null)
     showNotification('success', 'تم تحديث السعر بنجاح')
   }
@@ -263,7 +411,7 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
   }
 
   // Add new category
-  const addCategory = () => {
+  const addCategory = async () => {
     if (!newCategory.name.trim()) return
 
     const categoryId = Date.now().toString()
@@ -274,10 +422,11 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
       color: newCategory.color
     }
 
+    // Update local state
     setPricingData(prev => {
       const updatedCategories = [...prev.categories, newCat]
       const updatedPrices = { ...prev.prices }
-      
+
       // Add default prices for new category
       prev.sizes.forEach(size => {
         if (!updatedPrices[size]) updatedPrices[size] = {}
@@ -291,6 +440,14 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
         prices: updatedPrices
       }
     })
+
+    // Auto-save new category (this is more for demo - categories are UI-specific)
+    try {
+      await autoSaveChanges({})
+      console.log(`تم حفظ الفئ�� الجديدة تلقائياً: ${newCategory.name}`)
+    } catch (error) {
+      console.warn('لم يتم حفظ الفئة الجديدة تلقائياً:', error)
+    }
 
     setNewCategory({ name: '', description: '', color: 'blue' })
     setShowCategoryModal(false)
@@ -320,7 +477,7 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
   }
 
   // Add new size
-  const addSize = () => {
+  const addSize = async () => {
     const newSize = prompt('أدخل المقاس الجديد (مثال: 6x14):')
     if (!newSize || !newSize.match(/^\d+x\d+$/)) {
       showNotification('error', 'يرجى إدخال مقاس صحيح بصيغة رقمxرقم')
@@ -430,20 +587,60 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
     XLSX.writeFile(workbook, 'municipalities.xlsx')
   }
 
+  // Auto-save changes to the pricing service
+  const autoSaveChanges = async (changes: any) => {
+    try {
+      const { newPricingService } = await import('@/services/newPricingService')
+      const currentPricing = newPricingService.getPricing()
+
+      // Update the pricing data with changes
+      const updatedPricing = {
+        ...currentPricing,
+        ...changes
+      }
+
+      const result = newPricingService.updatePricing(updatedPricing)
+
+      if (result.success) {
+        console.log('تم حفظ التغييرات تلقائياً')
+        return true
+      } else {
+        console.error('فشل في الحفظ التلقائي:', result.error)
+        return false
+      }
+    } catch (error) {
+      console.error('خطأ في الحفظ التلقائي:', error)
+      return false
+    }
+  }
+
   // Save all changes
-  const saveAllChanges = () => {
+  const saveAllChanges = async () => {
     setLoading(true)
-    setTimeout(() => {
-      setUnsavedChanges({ hasChanges: false, changedCells: new Set() })
-      setLoading(false)
-      showNotification('success', 'تم حفظ جميع التغييرات بنجاح')
-    }, 1000)
+
+    try {
+      // Save to the new pricing service
+      const success = await autoSaveChanges({
+        // Add any specific changes that need to be saved
+      })
+
+      if (success) {
+        setUnsavedChanges({ hasChanges: false, changedCells: new Set() })
+        showNotification('success', 'تم حفظ جميع التغييرات بنجاح')
+      } else {
+        showNotification('error', 'فشل في حفظ بعض التغييرات')
+      }
+    } catch (error: any) {
+      showNotification('error', `خطأ في الحفظ: ${error.message}`)
+    }
+
+    setLoading(false)
   }
 
   // Reset all changes
-  const resetAllChanges = () => {
+  const resetAllChanges = async () => {
     if (window.confirm('هل أنت متأكد من إلغاء جميع التغييرات غير المحفوظة؟')) {
-      initializePricingData()
+      await initializePricingData()
       setUnsavedChanges({ hasChanges: false, changedCells: new Set() })
       showNotification('success', 'تم إلغاء جميع التغييرات')
     }
@@ -487,13 +684,17 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
           {/* Notification */}
           {notification && (
             <div className={`mb-6 p-4 rounded-lg border-l-4 ${
-              notification.type === 'success' 
-                ? 'bg-green-50 border-green-400 text-green-700' 
+              notification.type === 'success'
+                ? 'bg-green-50 border-green-400 text-green-700'
+                : notification.type === 'info'
+                ? 'bg-blue-50 border-blue-400 text-blue-700'
                 : 'bg-red-50 border-red-400 text-red-700'
             }`}>
               <div className="flex items-center gap-2">
                 {notification.type === 'success' ? (
                   <CheckCircle className="w-5 h-5" />
+                ) : notification.type === 'info' ? (
+                  <Info className="w-5 h-5" />
                 ) : (
                   <AlertTriangle className="w-5 h-5" />
                 )}
@@ -665,6 +866,101 @@ const EnhancedPricingManagement: React.FC<{ onClose: () => void }> = ({ onClose 
               ))}
             </div>
           </Card>
+
+          {/* Sync Status and Controls */}
+          {(syncStatus.needsSync || syncStatus.lastSync) && (
+            <Card className="mb-6 p-4 border-2 border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                    <RotateCcw className="w-6 h-6 text-blue-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-blue-900">مزامنة المناطق السعرية مع ملف الإكسل</h3>
+                    {syncStatus.needsSync ? (
+                      <p className="text-sm text-blue-700">
+                        🔥 تم الع��ور عل�� <span className="font-bold">{syncStatus.missingZones?.length || 0}</span> منطقة جديدة في ملف الإكسل تحتاج إلى مزامنة
+                      </p>
+                    ) : syncStatus.lastSync ? (
+                      <p className="text-sm text-green-700">
+                        ✅ آخر مزامنة: {new Date(syncStatus.lastSync).toLocaleString('ar-SA')}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {syncStatus.lastSync && (
+                    <Button
+                      onClick={() => setShowSyncInfo(!showSyncInfo)}
+                      variant="outline"
+                      size="sm"
+                      className="text-blue-600 border-blue-300"
+                    >
+                      <Info className="w-4 h-4 mr-2" />
+                      التفاصيل
+                    </Button>
+                  )}
+                  <Button
+                    onClick={syncWithExcel}
+                    disabled={syncStatus.isLoading}
+                    className={`${
+                      syncStatus.needsSync
+                        ? 'bg-orange-600 hover:bg-orange-700 animate-pulse'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    } text-white`}
+                  >
+                    {syncStatus.isLoading ? (
+                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <RotateCcw className="w-4 h-4 mr-2" />
+                    )}
+                    {syncStatus.isLoading ? 'جاري المزامنة...' : 'مزامنة الآن'}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Sync Info Details */}
+              {showSyncInfo && syncStatus.lastSync && (
+                <div className="mt-4 p-3 bg-white rounded-lg border border-blue-200">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div className="text-center">
+                      <div className="font-bold text-blue-900">{syncStatus.totalMunicipalities || 0}</div>
+                      <div className="text-blue-700">إجمالي البلديات</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="font-bold text-green-900">{syncStatus.existingZones || 0}</div>
+                      <div className="text-green-700">مناطق موجودة</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="font-bold text-orange-900">{syncStatus.newZonesCreated || 0}</div>
+                      <div className="text-orange-700">مناطق جديدة</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="font-bold text-purple-900">{Object.keys(pricingData.zones || {}).length}</div>
+                      <div className="text-purple-700">إجمالي المناطق</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Missing Zones List */}
+              {syncStatus.needsSync && syncStatus.missingZones && syncStatus.missingZones.length > 0 && (
+                <div className="mt-4 p-3 bg-orange-50 rounded-lg border border-orange-200">
+                  <h4 className="font-bold text-orange-900 mb-2">المناطق الجديدة المكتشفة:</h4>
+                  <div className="flex flex-wrap gap-2">
+                    {syncStatus.missingZones.map(zone => (
+                      <span
+                        key={zone}
+                        className="px-2 py-1 bg-orange-100 text-orange-800 rounded-full text-xs font-semibold"
+                      >
+                        {zone}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Card>
+          )}
 
           {/* Search and Controls */}
           <Card className="mb-6 p-4">

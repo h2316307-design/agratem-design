@@ -1,7 +1,7 @@
 import { PriceList, BillboardSize, QuoteItem, Quote, CustomerType, PackageDuration, PriceListType, SizeManagement, DurationPricing } from '@/types'
 import { formatGregorianDate } from '@/lib/dateUtils'
 
-// المقاسات الافتراضية
+// ا��مقاسات الافتراضية
 const DEFAULT_SIZES: BillboardSize[] = ['5x13', '4x12', '4x10', '3x8', '3x6', '3x4']
 
 // الباقات الزمنية المتاحة
@@ -81,7 +81,7 @@ const DEFAULT_PRICING_NEW: PriceList = {
 
 /**
  * خدمة إدارة الأسعار المحدثة
- * تدعم المدد المختلفة والمقاسات الديناميكية
+ * تدعم المدد المختلفة والم��اسات الديناميكية
  */
 class NewPricingService implements SizeManagement {
   private readonly PRICING_STORAGE_KEY = 'al-fares-pricing-v2'
@@ -415,19 +415,74 @@ class NewPricingService implements SizeManagement {
       return true
     }
 
-    // نسخ أسعار المنطقة الأساسية
-    const baseZoneData = pricing.zones[baseZone]
-    if (!baseZoneData) {
-      return false
-    }
+    // استخدام خدمة إدارة المناطق التلقائية إذا كانت متاحة
+    try {
+      const { pricingZoneAutoManager } = require('./pricingZoneAutoManager')
+      const newZone = pricingZoneAutoManager.createDefaultPricingZone(zoneName, baseZone)
+      pricing.zones[zoneName] = newZone
+    } catch (error) {
+      // الطريقة القديمة كـ fallback
+      const baseZoneData = pricing.zones[baseZone]
+      if (!baseZoneData) {
+        return false
+      }
 
-    // إنشاء منطقة جديدة بنفس أسعار المنطقة الأساسية
-    pricing.zones[zoneName] = {
-      ...baseZoneData,
-      name: zoneName
+      pricing.zones[zoneName] = {
+        ...baseZoneData,
+        name: zoneName
+      }
     }
 
     return this.updatePricing(pricing).success
+  }
+
+  /**
+   * مزامنة المناطق السعرية مع ملف الإك��ل تلقائياً
+   */
+  async syncWithExcelData(): Promise<{ success: boolean; summary?: any; error?: string }> {
+    try {
+      // استيراد خدمة إدارة المناطق التلقائية
+      const { pricingZoneAutoManager } = await import('./pricingZoneAutoManager')
+
+      // تنفيذ المزامنة
+      const result = await pricingZoneAutoManager.syncPricingZonesWithExcel()
+
+      if (result.success) {
+        console.log('[NewPricingService] تمت مزامنة المناطق السعرية بنجاح')
+        return {
+          success: true,
+          summary: {
+            totalMunicipalities: result.totalMunicipalities,
+            existingZones: result.existingZones.length,
+            newZonesCreated: result.newZonesCreated.length,
+            newZones: result.newZonesCreated
+          }
+        }
+      } else {
+        return { success: false, error: result.errors.join(', ') }
+      }
+    } catch (error: any) {
+      console.error('[NewPricingService] خطأ في مزامنة المناطق:', error)
+      return { success: false, error: error.message }
+    }
+  }
+
+  /**
+   * التحقق من الحاجة لمزامنة المناطق السعرية
+   */
+  async checkNeedForSync(): Promise<{ needsSync: boolean; missingZones: string[] }> {
+    try {
+      const { pricingZoneAutoManager } = await import('./pricingZoneAutoManager')
+      const analysis = await pricingZoneAutoManager.analyzePricingZones()
+
+      return {
+        needsSync: analysis.missingZones.length > 0,
+        missingZones: analysis.missingZones
+      }
+    } catch (error) {
+      console.error('[NewPricingService] خطأ في فحص الحاجة للمزامنة:', error)
+      return { needsSync: false, missingZones: [] }
+    }
   }
 
   /**
@@ -447,7 +502,7 @@ class NewPricingService implements SizeManagement {
       console.warn('خطأ في الحصول على معامل البلدية:', error)
     }
 
-    // الافتراضي هو 1 إذا لم يجد المعامل
+    // الافتراضي هو 1 إذا لم يجد المعام��
     return 1.0
   }
 

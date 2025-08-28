@@ -13,6 +13,7 @@ import SystemSettings from "@/components/SystemSettings"
 import EnhancedPricingManagement from "@/components/EnhancedPricingManagement"
 import InstallationPricingManagement from "@/components/InstallationPricingManagement"
 import QuoteDialog from "@/components/QuoteDialog"
+import PricingSystemStatus from "@/components/PricingSystemStatus"
 import { loadBillboardsFromExcel } from "@/services/billboardService"
 import { clientService } from "@/services/clientService"
 import { Billboard } from "@/types"
@@ -44,6 +45,7 @@ export default function MainApp() {
   const [showPricingManagement, setShowPricingManagement] = useState(false)
   const [showInstallationPricing, setShowInstallationPricing] = useState(false)
   const [showQuoteDialog, setShowQuoteDialog] = useState(false)
+  const [showSystemStatus, setShowSystemStatus] = useState(false)
 
   const itemsPerPage = 12
 
@@ -382,13 +384,13 @@ ${selectedBillboardsData
           <div class="logo-section">
             <img src="${window.location.origin}/logo-symbol.svg" alt="شعار الشركة" class="logo" onerror="this.style.display='none'" />
             <div class="company-info">
-              <div class="company-name-ar">الفــــارس الذهبــــي</div>
+              <div class="company-name-ar">الفــــارس الذ��بــــي</div>
               <div class="company-name-en">AL FARES AL DAHABI</div>
               <div class="company-name-ar" style="font-size: 10px;">للدعــــــاية والإعـــلان</div>
             </div>
           </div>
           <div class="title-section">
-            <div class="report-title">المساحات الإعلانية المتاحة</div>
+            <div class="report-title">��لمساحات الإعلانية المتاحة</div>
           </div>
         </div>
 
@@ -605,6 +607,13 @@ ${selectedBillboardsData
               >
                 <Wrench className="w-4 h-4 mr-2" />
                 أسعار التركيب
+              </Button>
+              <Button
+                onClick={() => setShowSystemStatus(true)}
+                className="bg-purple-600 hover:bg-purple-700 text-white"
+              >
+                <Settings className="w-4 h-4 mr-2" />
+                حالة النظام والاختبار
               </Button>
             </div>
           </div>
@@ -830,6 +839,28 @@ ${selectedBillboardsData
           selectedBillboards={selectedBillboards}
           billboards={billboards}
         />
+      )}
+
+      {/* صفحة حالة النظام والاختبار */}
+      {showSystemStatus && user?.permissions.some(p => p.name === 'admin_access') && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[95vh] overflow-hidden">
+            <div className="bg-gradient-to-r from-purple-600 to-purple-700 p-4 text-white flex items-center justify-between">
+              <h2 className="text-xl font-bold">حالة النظام والاختبار</h2>
+              <Button
+                onClick={() => setShowSystemStatus(false)}
+                variant="outline"
+                size="sm"
+                className="bg-white/20 border-white/30 text-white hover:bg-white/30"
+              >
+                إغلاق
+              </Button>
+            </div>
+            <div className="overflow-y-auto max-h-[calc(95vh-80px)]">
+              <PricingSystemStatus />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
